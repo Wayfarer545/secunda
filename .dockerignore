@@ -1,0 +1,9 @@
+.venv
+.git
+__pycache__
+**/__pycache__
+tests
+.env
+.pytest_cache
+.ruff_cache
+spec.md
