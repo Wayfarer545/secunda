@@ -1,0 +1,92 @@
+# Адреса БД и брокера прибиты в environment (имена сервисов стека) и имеют
+# приоритет над .env: скопированный для локальной разработки .env с localhost
+# не ломает контейнеры. Сам .env опционален, стек стартует без него.
+# build объявлен только у api: общий образ собирается один раз,
+# параллельная сборка одного тега ломает buildkit
+x-app-base: &app-base
+  image: secunda:local
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    DATABASE_URL: postgresql+asyncpg://secunda:secunda@postgres:5432/secunda
+    RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+
+x-worker-depends: &worker-depends
+  migrations:
+    condition: service_completed_successfully
+  rabbitmq:
+    condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: secunda
+      POSTGRES_PASSWORD: secunda
+      POSTGRES_DB: secunda
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "secunda", "-d", "secunda"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  migrations:
+    <<: *app-base
+    command: alembic upgrade head
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *app-base
+    build: .
+    command: uvicorn app.api.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    depends_on: *worker-depends
+    healthcheck:
+      # curl/wget в slim-образе нет
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  consumer:
+    <<: *app-base
+    command: faststream run app.broker.consumer:app
+    restart: unless-stopped
+    depends_on: *worker-depends
+
+  relay:
+    <<: *app-base
+    command: python -m app.relay
+    restart: unless-stopped
+    depends_on: *worker-depends
+
+volumes:
+  pgdata:
